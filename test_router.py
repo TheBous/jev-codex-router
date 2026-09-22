@@ -1,4 +1,5 @@
 import json
+import logging
 from http.server import ThreadingHTTPServer
 from threading import Thread
 from urllib.error import HTTPError
@@ -37,7 +38,6 @@ CONFIG = {
     },
     "session_affinity": True,
     "session_max": 8,
-    "typesafe_confidence_min": 0.5,
 }
 
 
@@ -52,16 +52,9 @@ def test_router() -> None:
         "MIMO_API_KEY": "sk-test",
     }
 
-    options = TypeSafeClassifier(CONFIG["models"])._options
-    assert options == {
-        "fast-model@low": None,
-        "fast-model@medium": None,
-        "coding-model@medium": None,
-        "coding-model@high": None,
-        "mimo-v2.6-flash@none": None,
-        "mimo-v2.6-flash@low": None,
-        "mimo-v2.6-flash@high": None,
-    }
+    classifier_probe = TypeSafeClassifier(CONFIG["models"])
+    assert set(classifier_probe._model_options) == {"fast-model", "coding-model", "mimo-v2.6-flash"}
+    assert set(classifier_probe._effort_criteria()) == {"none", "low", "medium", "high"}
 
     classifier = FakeTypeSafe(("coding-model", "high", 0.91))
     router = Router(CONFIG, classifier=classifier)
@@ -88,10 +81,14 @@ def test_router() -> None:
     assert fallback.model == "coding-model"
     assert fallback.source == "heuristic"
 
-    uncertain = Router(CONFIG, classifier=FakeTypeSafe(("fast-model", "low", 0.1)))
-    low_confidence = uncertain.choose({"input": "debug a repository and refactor the API"})
-    assert low_confidence.tier == "COMPLEX"
-    assert low_confidence.source == "heuristic"
+    low_confidence = Router(CONFIG, classifier=FakeTypeSafe(("fast-model", "low", 0.1))).choose(
+        {"input": "debug a repository and refactor the API"}
+    )
+    assert low_confidence.tier is None
+    assert low_confidence.source == "typesafe"
+    assert low_confidence.provider == "fast"
+    assert low_confidence.model == "fast-model"
+    assert low_confidence.confidence == 0.1
 
     reasoning = Router(CONFIG, classifier=FakeTypeSafe(("mimo-v2.6-flash", "high", 0.99))).choose(
         {"input": "prove this algorithm"}
@@ -99,6 +96,29 @@ def test_router() -> None:
     assert reasoning.provider == "mimo"
     assert reasoning.model == "mimo-v2.6-flash"
     assert reasoning.reasoning_effort == "high"
+
+
+class TimeoutTypeSafe:
+    def classify(self, payload):
+        raise TimeoutError("TypeSafe timed out after 1.5s")
+
+
+def test_timeout_logs_warning_and_falls_back() -> None:
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    logger = logging.getLogger("codex_router")
+    logger.addHandler(handler)
+    try:
+        route = Router(CONFIG, classifier=TimeoutTypeSafe()).choose({"input": "prove this algorithm"})
+    finally:
+        logger.removeHandler(handler)
+
+    assert route.tier == "REASONING"
+    assert route.provider == "mimo"
+    assert route.model == "mimo-v2.6-flash"
+    assert route.source == "heuristic"
+    assert [record.levelname for record in records if record.name == "codex_router"] == ["WARNING"]
 
 
 def test_missing_provider_credential_is_not_reflected() -> None:
@@ -147,5 +167,6 @@ def test_missing_provider_credential_is_not_reflected() -> None:
 
 if __name__ == "__main__":
     test_router()
+    test_timeout_logs_warning_and_falls_back()
     test_missing_provider_credential_is_not_reflected()
     print("ok")

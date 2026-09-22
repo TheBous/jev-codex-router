@@ -100,6 +100,15 @@ class HeuristicClassifier:
         return "MEDIUM", None
 
 
+_EFFORT_MEANING = {
+    "none": "thinking disabled, fastest and cheapest",
+    "low": "minimal reasoning, very fast",
+    "medium": "balanced reasoning",
+    "high": "deep reasoning, slower and more expensive",
+    "xhigh": "maximum reasoning effort for the hardest problems",
+}
+
+
 class TypeSafeClassifier:
     def __init__(self, models: list[Mapping[str, Any]], timeout: float = 1.5) -> None:
         from typesafe_sdk import Choice, RetryPolicy, TypeSafeClient
@@ -109,27 +118,61 @@ class TypeSafeClassifier:
         self._retry = RetryPolicy(max_retries=0, timeout=timeout)
         self._timeout = timeout
         self._model_efforts = {model["name"]: list(model["efforts"]) for model in models}
-        self._options = {
-            f"{name}@{effort}": None
-            for name, efforts in self._model_efforts.items()
-            for effort in efforts
+        self._model_options = {
+            model["name"]: {"what": model["description"]} if model.get("description") else None
+            for model in models
         }
+
+    def _effort_criteria(self) -> dict[str, dict[str, str]]:
+        efforts: list[str] = []
+        for model_efforts in self._model_efforts.values():
+            for effort in model_efforts:
+                if effort not in efforts:
+                    efforts.append(effort)
+        return {effort: {"what": _EFFORT_MEANING.get(effort, f"reasoning effort '{effort}'")} for effort in efforts}
+
+    def _log_answer(self, question: str, answer: Any) -> None:
+        choice = getattr(answer, "choice", None)
+        confidence = getattr(answer, "confidence", None)
+        probabilities = getattr(answer, "probabilities", None) or {}
+        top = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)[:3]
+        LOG.info(
+            "TypeSafe %s answer choice=%s confidence=%s top=%s",
+            question,
+            choice,
+            f"{float(confidence):.2f}" if confidence is not None else "n/a",
+            " ".join(f"{name}={probability:.2f}" for name, probability in top),
+        )
 
     def classify(self, payload: Mapping[str, Any]) -> tuple[str, str, float | None]:
         questions = {
-            "route": self._choice(
+            "model": self._choice(
                 instructions={
-                    "question": "Which model and reasoning effort should handle this request?",
+                    "question": "Which model should handle this request?",
                     "focus": (
-                        "Options are 'model@effort' pairs. Prefer the cheapest capable "
-                        "choice: short, direct, low-risk requests need low or no reasoning; "
-                        "tool use, multi-step work, repository changes, or difficult "
-                        "analysis need high reasoning. Each model supports only the "
-                        "efforts listed for it."
+                        "Each option describes the model's strengths and cost. "
+                        "Prefer the cheapest model capable of the request: simple, "
+                        "direct, low-risk requests need a fast, cheap model; tool "
+                        "use, multi-step work, repository changes, or difficult "
+                        "analysis need the strongest model."
                     ),
                 },
-                criteria=self._options,
-            )
+                criteria=self._model_options,
+            ),
+            "effort": self._choice(
+                instructions={
+                    "question": "Which reasoning effort should the response use?",
+                    "focus": (
+                        "Choose the effort the request needs, regardless of model: "
+                        "none or low for short, direct, low-risk requests; medium "
+                        "for ordinary work needing some judgment; high for tool use, "
+                        "multi-step work, repository changes, or difficult analysis; "
+                        "xhigh only for the hardest problems. If the selected model "
+                        "does not support it, the closest supported effort is used."
+                    ),
+                },
+                criteria=self._effort_criteria(),
+            ),
         }
         with self._client_type(model="jev-latest", timeout=self._timeout) as client:
             response = client.system_one(
@@ -137,13 +180,23 @@ class TypeSafeClassifier:
                 questions=questions,
                 retry=self._retry,
             )
-        answer = response.answers["route"]
-        choice = getattr(answer, "choice", None)
-        confidence = getattr(answer, "confidence", None)
-        model, separator, effort = str(choice).partition("@")
-        if not separator or model not in self._model_efforts or effort not in self._model_efforts[model]:
-            raise ValueError(f"TypeSafe returned an invalid route: {choice!r}")
-        return model, effort, float(confidence) if confidence is not None else None
+        model_answer = response.answers["model"]
+        self._log_answer("model", model_answer)
+        model = getattr(model_answer, "choice", None)
+        model_confidence = getattr(model_answer, "confidence", None)
+        if model not in self._model_efforts:
+            raise ValueError(f"TypeSafe returned an invalid model: {model!r}")
+
+        effort_answer = response.answers["effort"]
+        self._log_answer("effort", effort_answer)
+        effort = getattr(effort_answer, "choice", None)
+        effort_confidence = getattr(effort_answer, "confidence", None)
+        if effort not in self._effort_criteria():
+            raise ValueError(f"TypeSafe returned an invalid effort: {effort!r}")
+
+        confidences = [float(value) for value in (model_confidence, effort_confidence) if value is not None]
+        confidence = min(confidences) if confidences else None
+        return model, effort, confidence
 
 
 class Router:
@@ -161,7 +214,6 @@ class Router:
         }
         self.tiers = config["tiers"]
         self.models = {model["name"]: model for model in config.get("models", [])}
-        self.confidence_min = float(config.get("typesafe_confidence_min", 0.5))
         self.session_affinity = bool(config.get("session_affinity", True))
         self.affinity = SessionAffinity(int(config.get("session_max", 10000)))
         self.heuristic = HeuristicClassifier()
@@ -201,7 +253,7 @@ class Router:
             try:
                 model, effort, confidence = self.classifier.classify(payload)
                 entry = self.models.get(model)
-                if entry and (confidence is None or confidence >= self.confidence_min):
+                if entry:
                     if effort not in entry["efforts"]:
                         LOG.info(
                             "TypeSafe effort %r unsupported for %s; using default",
@@ -210,7 +262,9 @@ class Router:
                         )
                         effort = entry["default_effort"]
                     return entry.get("provider"), model, effort, confidence, "typesafe", None
-                LOG.info("TypeSafe confidence too low; using heuristic fallback")
+                LOG.info("TypeSafe model %r not in catalog; using heuristic fallback", model)
+            except TimeoutError as error:
+                LOG.warning("TypeSafe timeout (%s); using heuristic fallback", error)
             except Exception:
                 LOG.exception("TypeSafe routing failed; using heuristic fallback")
         tier, _ = self.heuristic.classify(payload)
