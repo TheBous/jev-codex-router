@@ -1,0 +1,41 @@
+{
+  "providers": {
+    "openai": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "wire_api": "responses"
+    },
+    "deepseek": {
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "wire_api": "responses"
+    },
+    "mimo": {
+      "base_url": "https://token-plan-ams.xiaomimimo.com/v1",
+      "api_key_env": "MIMO_API_KEY",
+      "wire_api": "responses"
+    },
+    "mimo_token_plan": {
+      "base_url": "https://token-plan-ams.xiaomimimo.com/v1",
+      "api_key_env": "MIMO_TOKEN_PLAN_API_KEY",
+      "headers": {"X-OpenAI-Internal-Codex-Responses-Lite": "true"},
+      "wire_api": "responses"
+    },
+    "glm": {
+      "base_url": "https://api.z.ai/api/paas/v4",
+      "api_key_env": "GLM_API_KEY",
+      "wire_api": "chat",
+      "model": "glm-5.3-flash"
+    }
+  },
+  "tiers": {
+    "SIMPLE": {"provider": "mimo", "model": "mimo-v2.6-flash", "reasoning_effort": "low"},
+    "MEDIUM": {"provider": "deepseek", "model": "deepseek-flash", "reasoning_effort": "medium"},
+    "COMPLEX": {"provider": "deepseek", "model": "deepseek-flash", "reasoning_effort": "high"},
+    "REASONING": {"provider": "openai", "model": "gpt-5.6-terra", "reasoning_effort": "high"}
+  },
+  "session_affinity": true,
+  "session_max": 10000,
+  "typesafe_confidence_min": 0.5,
+  "typesafe_timeout_seconds": 1.5
+}

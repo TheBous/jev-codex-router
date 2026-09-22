@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+router.py
+codex_dynamic_model_router.egg-info/PKG-INFO
+codex_dynamic_model_router.egg-info/SOURCES.txt
+codex_dynamic_model_router.egg-info/dependency_links.txt
+codex_dynamic_model_router.egg-info/entry_points.txt
+codex_dynamic_model_router.egg-info/requires.txt
+codex_dynamic_model_router.egg-info/top_level.txt

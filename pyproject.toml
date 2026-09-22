@@ -1,0 +1,16 @@
+[project]
+name = "codex-dynamic-model-router"
+version = "0.1.0"
+description = "Small OpenAI-compatible model router for Codex"
+requires-python = ">=3.10"
+dependencies = ["typesafe-sdk"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["router"]
+
+[project.scripts]
+codex-router = "router:main"
