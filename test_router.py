@@ -6,7 +6,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from router import Handler, Route, Router, TypeSafeClassifier, _dotenv_values
+from router import Handler, Route, Router, TypeSafeClassifier, _dotenv_values, _strip_reasoning_content
 
 
 class FakeTypeSafe:
@@ -103,6 +103,24 @@ class TimeoutTypeSafe:
         raise TimeoutError("TypeSafe timed out after 1.5s")
 
 
+def test_reasoning_content_stripped_for_strict_providers() -> None:
+    reasoning_item = {
+        "type": "reasoning",
+        "id": "rs_1",
+        "summary": [],
+        "content": [{"type": "reasoning_text", "text": "mimo thinking"}],
+    }
+    message_item = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+    cleaned = _strip_reasoning_content([reasoning_item, message_item])
+
+    assert "content" not in cleaned[0]
+    assert cleaned[0]["type"] == "reasoning"
+    assert cleaned[0]["id"] == "rs_1"
+    assert cleaned[0]["summary"] == []
+    assert cleaned[1] == message_item
+    assert _strip_reasoning_content("not a list") == "not a list"
+
+
 def test_timeout_logs_warning_and_falls_back() -> None:
     records = []
     handler = logging.Handler()
@@ -167,6 +185,7 @@ def test_missing_provider_credential_is_not_reflected() -> None:
 
 if __name__ == "__main__":
     test_router()
+    test_reasoning_content_stripped_for_strict_providers()
     test_timeout_logs_warning_and_falls_back()
     test_missing_provider_credential_is_not_reflected()
     print("ok")

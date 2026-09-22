@@ -3,6 +3,7 @@
     "openai": {
       "base_url": "https://api.openai.com/v1",
       "api_key_env": "OPENAI_API_KEY",
+      "drop_reasoning_content": true,
       "wire_api": "responses"
     },
     "deepseek": {

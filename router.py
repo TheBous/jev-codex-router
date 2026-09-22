@@ -37,10 +37,23 @@ class Provider:
     wire_api: str
     headers: Mapping[str, str]
     model: str | None
+    drop_reasoning_content: bool = False
 
     @property
     def responses_url(self) -> str:
         return self.base_url.rstrip("/") + "/responses"
+
+
+def _strip_reasoning_content(input_items: Any) -> Any:
+    """Strict OpenAI-schema providers reject reasoning items that carry a content array."""
+    if not isinstance(input_items, list):
+        return input_items
+    cleaned = []
+    for item in input_items:
+        if isinstance(item, Mapping) and item.get("type") == "reasoning":
+            item = {key: value for key, value in item.items() if key != "content"}
+        cleaned.append(item)
+    return cleaned
 
 
 class SessionAffinity:
@@ -209,6 +222,7 @@ class Router:
                 wire_api=provider.get("wire_api", "responses"),
                 headers=provider.get("headers", {}),
                 model=provider.get("model"),
+                drop_reasoning_content=bool(provider.get("drop_reasoning_content", False)),
             )
             for name, provider in config["providers"].items()
         }
@@ -395,6 +409,8 @@ class Handler(BaseHTTPRequestHandler):
             reasoning = dict(body.get("reasoning") or {})
             reasoning["effort"] = route.reasoning_effort
             body["reasoning"] = reasoning
+        if provider.drop_reasoning_content:
+            body["input"] = _strip_reasoning_content(body.get("input"))
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream" if body.get("stream") else "application/json"}
         headers.update(provider.headers)
         if provider.api_key_env:
