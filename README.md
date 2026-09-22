@@ -6,7 +6,9 @@ Small local proxy for Codex:
 Codex -> codex-router -> TypeSafe/Jev classification -> selected Responses provider
 ```
 
-Jev chooses `SIMPLE`, `MEDIUM`, `COMPLEX`, or `REASONING` with a TypeSafe `Choice`. The router pins the selected target for a session and falls back to deterministic heuristics when TypeSafe is unavailable or below the configured confidence threshold.
+Jev picks the model and its reasoning effort with a single TypeSafe `Choice` over the `model@effort` pairs generated from the `models` catalog in `router.json` — each model lists only the efforts it supports. The router pins the selected route for a session and falls back to deterministic heuristics over `tiers` when TypeSafe is unavailable, below the configured confidence threshold, or returning pairs outside the catalog.
+
+The DeepSeek and OpenAI catalog entries are placeholders until their Responses endpoints are verified; an unusable upstream surfaces as an `upstream rejected provider=...` log line and does not crash the router.
 
 ## Run
 

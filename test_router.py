@@ -5,7 +5,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from router import Handler, Route, Router, _dotenv_values
+from router import Handler, Route, Router, TypeSafeClassifier, _dotenv_values
 
 
 class FakeTypeSafe:
@@ -24,6 +24,11 @@ CONFIG = {
         "strong": {"base_url": "http://strong.test/v1", "wire_api": "responses"},
         "mimo": {"base_url": "https://api.xiaomimimo.com/v1", "wire_api": "responses"},
     },
+    "models": [
+        {"name": "fast-model", "provider": "fast", "efforts": ["low", "medium"], "default_effort": "low"},
+        {"name": "coding-model", "provider": "strong", "efforts": ["medium", "high"], "default_effort": "high"},
+        {"name": "mimo-v2.6-flash", "provider": "mimo", "efforts": ["none", "low", "high"], "default_effort": "low"},
+    ],
     "tiers": {
         "SIMPLE": {"provider": "fast", "model": "fast-model", "reasoning_effort": "low"},
         "MEDIUM": {"provider": "fast", "model": "medium-model", "reasoning_effort": "medium"},
@@ -47,24 +52,53 @@ def test_router() -> None:
         "MIMO_API_KEY": "sk-test",
     }
 
-    classifier = FakeTypeSafe(("COMPLEX", 0.91))
+    options = TypeSafeClassifier(CONFIG["models"])._options
+    assert options == {
+        "fast-model@low": None,
+        "fast-model@medium": None,
+        "coding-model@medium": None,
+        "coding-model@high": None,
+        "mimo-v2.6-flash@none": None,
+        "mimo-v2.6-flash@low": None,
+        "mimo-v2.6-flash@high": None,
+    }
+
+    classifier = FakeTypeSafe(("coding-model", "high", 0.91))
     router = Router(CONFIG, classifier=classifier)
     request_with_tool = {"input": "edit the repository", "tools": [{"name": "apply_patch"}]}
 
     first = router.choose(request_with_tool, "session-1")
     second = router.choose({"input": "a short unrelated question"}, "session-1")
-    assert first == Route("COMPLEX", "strong", "coding-model", 0.91, "typesafe", "high")
+    assert first == Route(None, "strong", "coding-model", 0.91, "typesafe", "high")
     assert second == first
     assert classifier.calls == 1
 
-    uncertain = Router(CONFIG, classifier=FakeTypeSafe(("SIMPLE", 0.1)))
-    fallback = uncertain.choose({"input": "debug a repository and refactor the API"})
+    unsupported = Router(CONFIG, classifier=FakeTypeSafe(("mimo-v2.6-flash", "xhigh", 0.99)))
+    snapped = unsupported.choose({"input": "a quick question"})
+    assert snapped.provider == "mimo"
+    assert snapped.model == "mimo-v2.6-flash"
+    assert snapped.reasoning_effort == "low"
+    assert snapped.source == "typesafe"
+    assert snapped.tier is None
+
+    invalid = Router(CONFIG, classifier=FakeTypeSafe(("gpt-5.6-terra", "high", 0.99)))
+    fallback = invalid.choose({"input": "debug a repository and refactor the API"})
     assert fallback.tier == "COMPLEX"
+    assert fallback.provider == "strong"
+    assert fallback.model == "coding-model"
     assert fallback.source == "heuristic"
 
-    reasoning = Router(CONFIG, classifier=FakeTypeSafe(("REASONING", 0.99))).choose({"input": "prove this algorithm"})
+    uncertain = Router(CONFIG, classifier=FakeTypeSafe(("fast-model", "low", 0.1)))
+    low_confidence = uncertain.choose({"input": "debug a repository and refactor the API"})
+    assert low_confidence.tier == "COMPLEX"
+    assert low_confidence.source == "heuristic"
+
+    reasoning = Router(CONFIG, classifier=FakeTypeSafe(("mimo-v2.6-flash", "high", 0.99))).choose(
+        {"input": "prove this algorithm"}
+    )
     assert reasoning.provider == "mimo"
     assert reasoning.model == "mimo-v2.6-flash"
+    assert reasoning.reasoning_effort == "high"
 
 
 def test_missing_provider_credential_is_not_reflected() -> None:
@@ -77,9 +111,10 @@ def test_missing_provider_credential_is_not_reflected() -> None:
             }
         },
         "tiers": {"REASONING": {"provider": "mimo", "model": "mimo-model"}},
+        "models": [{"name": "mimo-model", "provider": "mimo", "efforts": ["high"], "default_effort": "high"}],
         "session_affinity": False,
     }
-    Handler.router = Router(config, classifier=FakeTypeSafe(("REASONING", 0.99)))
+    Handler.router = Router(config, classifier=FakeTypeSafe(("mimo-model", "high", 0.99)))
     Handler.router_api_key = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = Thread(target=server.serve_forever, daemon=True)

@@ -17,12 +17,11 @@ from urllib.request import Request, urlopen
 
 
 LOG = logging.getLogger("codex_router")
-TIERS = ("SIMPLE", "MEDIUM", "COMPLEX", "REASONING")
 
 
 @dataclass(frozen=True)
 class Route:
-    tier: str
+    tier: str | None
     provider: str
     model: str
     confidence: float | None
@@ -102,39 +101,34 @@ class HeuristicClassifier:
 
 
 class TypeSafeClassifier:
-    def __init__(self, timeout: float = 1.5) -> None:
+    def __init__(self, models: list[Mapping[str, Any]], timeout: float = 1.5) -> None:
         from typesafe_sdk import Choice, RetryPolicy, TypeSafeClient
 
         self._choice = Choice
         self._client_type = TypeSafeClient
         self._retry = RetryPolicy(max_retries=0, timeout=timeout)
         self._timeout = timeout
+        self._model_efforts = {model["name"]: list(model["efforts"]) for model in models}
+        self._options = {
+            f"{name}@{effort}": None
+            for name, efforts in self._model_efforts.items()
+            for effort in efforts
+        }
 
-    def classify(self, payload: Mapping[str, Any]) -> tuple[str, float | None]:
+    def classify(self, payload: Mapping[str, Any]) -> tuple[str, str, float | None]:
         questions = {
-            "tier": self._choice(
+            "route": self._choice(
                 instructions={
-                    "question": "Which execution tier best fits this request?",
-                    "focus": "Choose based on the work required, not the user's tone.",
+                    "question": "Which model and reasoning effort should handle this request?",
+                    "focus": (
+                        "Options are 'model@effort' pairs. Prefer the cheapest capable "
+                        "choice: short, direct, low-risk requests need low or no reasoning; "
+                        "tool use, multi-step work, repository changes, or difficult "
+                        "analysis need high reasoning. Each model supports only the "
+                        "efforts listed for it."
+                    ),
                 },
-                criteria={
-                    "SIMPLE": {
-                        "what": "A short, direct, low-risk request with no tool use or multi-step work.",
-                        "examples": ["Explain a term", "Format a small snippet"],
-                    },
-                    "MEDIUM": {
-                        "what": "An ordinary request requiring some context or judgment but limited execution.",
-                        "examples": ["Summarize a document", "Make a small code change"],
-                    },
-                    "COMPLEX": {
-                        "what": "A multi-step coding, debugging, tool-use, repository, or broad-context task.",
-                        "examples": ["Refactor a subsystem", "Use tools to modify and verify code"],
-                    },
-                    "REASONING": {
-                        "what": "A difficult analysis, proof, architecture decision, or ambiguous problem where deep reasoning matters.",
-                        "examples": ["Compare competing designs", "Prove why an algorithm works"],
-                    },
-                },
+                criteria=self._options,
             )
         }
         with self._client_type(model="jev-latest", timeout=self._timeout) as client:
@@ -143,12 +137,13 @@ class TypeSafeClassifier:
                 questions=questions,
                 retry=self._retry,
             )
-        answer = response.answers["tier"]
+        answer = response.answers["route"]
         choice = getattr(answer, "choice", None)
         confidence = getattr(answer, "confidence", None)
-        if choice not in TIERS:
-            raise ValueError(f"TypeSafe returned an invalid tier: {choice!r}")
-        return choice, float(confidence) if confidence is not None else None
+        model, separator, effort = str(choice).partition("@")
+        if not separator or model not in self._model_efforts or effort not in self._model_efforts[model]:
+            raise ValueError(f"TypeSafe returned an invalid route: {choice!r}")
+        return model, effort, float(confidence) if confidence is not None else None
 
 
 class Router:
@@ -165,15 +160,17 @@ class Router:
             for name, provider in config["providers"].items()
         }
         self.tiers = config["tiers"]
+        self.models = {model["name"]: model for model in config.get("models", [])}
         self.confidence_min = float(config.get("typesafe_confidence_min", 0.5))
         self.session_affinity = bool(config.get("session_affinity", True))
         self.affinity = SessionAffinity(int(config.get("session_max", 10000)))
         self.heuristic = HeuristicClassifier()
         self.classifier = classifier
-        if self.classifier is None and os.getenv("TYPESAFE_API_KEY"):
+        if self.classifier is None and self.models and os.getenv("TYPESAFE_API_KEY"):
             try:
                 self.classifier = TypeSafeClassifier(
-                    timeout=float(config.get("typesafe_timeout_seconds", 1.5))
+                    list(self.models.values()),
+                    timeout=float(config.get("typesafe_timeout_seconds", 1.5)),
                 )
             except Exception:
                 LOG.exception("TypeSafe classifier unavailable; using heuristics")
@@ -184,42 +181,43 @@ class Router:
             if pinned:
                 return pinned
 
-        tier, confidence, source = self._classify(payload)
-        target = self.tiers.get(tier) or self.tiers.get("MEDIUM")
-        if not target:
-            raise ValueError("router config has no MEDIUM tier")
-        provider_name = target["provider"]
+        provider_name, model, effort, confidence, source, tier = self._classify(payload)
         provider = self.providers.get(provider_name)
         if not provider:
-            raise ValueError(f"tier {tier} references unknown provider {provider_name!r}")
+            raise ValueError(f"route references unknown provider {provider_name!r}")
         if provider.wire_api != "responses":
             raise ValueError(
                 f"provider {provider_name!r} uses {provider.wire_api!r}; "
                 "this MVP only forwards Responses API providers"
             )
-        route = Route(
-            tier,
-            provider_name,
-            target["model"],
-            confidence,
-            source,
-            target.get("reasoning_effort"),
-        )
+        route = Route(tier, provider_name, model, confidence, source, effort)
         if self.session_affinity:
             self.affinity.put(session_key, route)
         return route
 
-    def _classify(self, payload: Mapping[str, Any]) -> tuple[str, float | None, str]:
+    def _classify(self, payload: Mapping[str, Any]) -> tuple[str, str, str | None, float | None, str, str | None]:
+        """Returns (provider_name, model, effort, confidence, source, tier)."""
         if self.classifier:
             try:
-                tier, confidence = self.classifier.classify(payload)
-                if tier in TIERS and (confidence is None or confidence >= self.confidence_min):
-                    return tier, confidence, "typesafe"
+                model, effort, confidence = self.classifier.classify(payload)
+                entry = self.models.get(model)
+                if entry and (confidence is None or confidence >= self.confidence_min):
+                    if effort not in entry["efforts"]:
+                        LOG.info(
+                            "TypeSafe effort %r unsupported for %s; using default",
+                            effort,
+                            model,
+                        )
+                        effort = entry["default_effort"]
+                    return entry.get("provider"), model, effort, confidence, "typesafe", None
                 LOG.info("TypeSafe confidence too low; using heuristic fallback")
             except Exception:
                 LOG.exception("TypeSafe routing failed; using heuristic fallback")
-        tier, confidence = self.heuristic.classify(payload)
-        return tier, confidence, "heuristic"
+        tier, _ = self.heuristic.classify(payload)
+        target = self.tiers.get(tier) or self.tiers.get("MEDIUM")
+        if not target:
+            raise ValueError("router config has no MEDIUM tier")
+        return target["provider"], target["model"], target.get("reasoning_effort"), None, "heuristic", tier
 
 
 def _has_any(text: str, needles: tuple[str, ...]) -> bool:
@@ -320,13 +318,15 @@ class Handler(BaseHTTPRequestHandler):
             route = self.router.choose(payload, session_key)
             LOG.info(
                 "route selected tier=%s provider=%s model=%s effort=%s source=%s",
-                route.tier,
+                route.tier or "-",
                 route.provider,
                 route.model,
                 route.reasoning_effort or "default",
                 route.source,
             )
             self._forward(payload, route)
+        except (BrokenPipeError, ConnectionResetError):
+            LOG.info("client disconnected during response forwarding")
         except ValueError as error:
             self._json(400, {"error": {"message": str(error), "type": "invalid_request_error"}})
         except Exception as error:
@@ -352,7 +352,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             response = urlopen(request, timeout=120)
         except HTTPError as error:
-            self._send_upstream_error(error)
+            self._send_upstream_error(provider, error)
             return
         except URLError as error:
             raise RuntimeError(f"upstream unavailable: {error.reason}") from error
@@ -369,8 +369,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
                 self.wfile.flush()
 
-    def _send_upstream_error(self, error: HTTPError) -> None:
+    def _send_upstream_error(self, provider: Provider, error: HTTPError) -> None:
         body = error.read()
+        try:
+            parsed = json.loads(body)
+        except (TypeError, json.JSONDecodeError):
+            parsed = {}
+        details = parsed.get("error", {}) if isinstance(parsed, Mapping) else {}
+        if not isinstance(details, Mapping):
+            details = {}
+        LOG.warning(
+            "upstream rejected provider=%s status=%s type=%s code=%s param=%s",
+            provider.name,
+            error.code,
+            details.get("type", "unknown"),
+            details.get("code", "unknown"),
+            details.get("param", "unknown"),
+        )
         self.send_response(error.code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

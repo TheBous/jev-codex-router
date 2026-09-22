@@ -28,6 +28,11 @@
       "model": "glm-5.3-flash"
     }
   },
+  "models": [
+    {"name": "mimo-v2.6-flash", "provider": "mimo_token_plan", "efforts": ["none", "low", "high"], "default_effort": "low"},
+    {"name": "deepseek-flash", "provider": "deepseek", "efforts": ["low", "medium", "high"], "default_effort": "medium"},
+    {"name": "gpt-5.6-terra", "provider": "openai", "efforts": ["low", "medium", "high", "xhigh"], "default_effort": "medium"}
+  ],
   "tiers": {
     "SIMPLE": {"provider": "mimo", "model": "mimo-v2.6-flash", "reasoning_effort": "low"},
     "MEDIUM": {"provider": "deepseek", "model": "deepseek-flash", "reasoning_effort": "medium"},
