@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Codex router",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "router",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Router tests",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/test_router.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}
