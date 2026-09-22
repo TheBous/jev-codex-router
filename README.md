@@ -25,7 +25,9 @@ MiMo is configured for the `REASONING` tier as `mimo-v2.6-flash`; DeepSeek is co
 
 GLM is registered as `glm-5.3-flash`, but the current Z.AI API documentation exposes it through Chat Completions. The proxy currently forwards Responses API only, so GLM stays disabled for Codex until a Chat→Responses streaming/tool adapter is added.
 
-Configure Codex once:
+## Configure Codex
+
+Point Codex at the router by editing `~/.codex/config.toml` (`%USERPROFILE%\.codex\config.toml` on Windows):
 
 ```toml
 model = "codex-router"
@@ -38,6 +40,12 @@ wire_api = "responses"
 env_key = "CODEX_ROUTER_API_KEY"
 ```
 
+Set `env_key` only if you also run the router with `ROUTER_REQUIRE_AUTH=1` and Codex receives `CODEX_ROUTER_API_KEY` in its environment; otherwise omit that line. Restart Codex after editing (`codex` in a new terminal).
+
+### Revert Codex to its standard configuration
+
+Delete those lines from `~/.codex/config.toml` — the two top-level keys and the whole `[model_providers.router]` block — then restart Codex. Without a custom `model_provider`, Codex goes back to its default backend (ChatGPT sign-in, or `codex login` to authenticate). The router keeps running independently; re-adding the block re-enables it.
+
 ## Check
 
 ```bash
@@ -49,4 +57,3 @@ TypeSafe receives the request text, instructions, tool names, and reasoning sett
 The router loads `.env` automatically. Existing shell environment variables take precedence over `.env`; the real `.env` file is ignored by Git.
 
 Local authentication is disabled by default. Set `ROUTER_REQUIRE_AUTH=1` only when Codex also receives `CODEX_ROUTER_API_KEY` in its own environment.
-# jev-codex-router
